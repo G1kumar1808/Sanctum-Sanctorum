@@ -1,40 +1,63 @@
 """Book catalogue operations."""
 from typing import Optional
-
+ 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
-
+ 
 from app.models import Book
 from app.schemas import BookCreate, BookPage, BookSort, BookUpdate
-
-
+ 
+# Sortable columns exposed to clients, keyed by the value accepted in ``?sort=``.
+_SORT_COLUMNS = {"title": Book.title, "price": Book.price_cents}
+ 
+ 
+def _order_by(sort: Optional[BookSort]):
+    """Translate a ``sort`` value into ORDER BY clauses, always tie-breaking on id."""
+    if sort is None:
+        return (Book.id.asc(),)
+ 
+    descending = sort.startswith("-")
+    column = _SORT_COLUMNS[sort.lstrip("-")]
+    return (column.desc() if descending else column.asc(), Book.id.asc())
+ 
+ 
 def create_book(db: Session, data: BookCreate) -> Book:
     """Add a book to the catalogue.
-
+ 
     Rules: the (already normalized) ISBN must be unique -> 409 otherwise.
     """
-    # TODO: reject a duplicate ISBN with 409
+    if db.scalar(select(Book).where(Book.isbn == data.isbn)) is not None:
+        raise HTTPException(status_code=409, detail="A book with this ISBN already exists")
+ 
     book = Book(**data.model_dump())
     db.add(book)
     db.commit()
     db.refresh(book)
     return book
-
-
+ 
+ 
 def get_book(db: Session, book_id: int) -> Book:
     """Return a book by id, or raise 404."""
     book = db.get(Book, book_id)
     if book is None:
         raise HTTPException(status_code=404, detail="Book not found")
     return book
-
-
+ 
+ 
 def update_book(db: Session, book_id: int, data: BookUpdate) -> Book:
     """Apply a partial update. Only fields present in the request are changed; 404 if missing."""
-    raise NotImplementedError("update_book")
-
-
+    book = get_book(db, book_id)
+ 
+    # exclude_unset keeps fields the client never sent out of the dict, so they stay untouched.
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(book, field, value)
+ 
+    db.commit()
+    db.refresh(book)
+    return book
+ 
+ 
 def list_books(
     db: Session,
     q: Optional[str] = None,
@@ -46,7 +69,7 @@ def list_books(
     offset: int = 0,
 ) -> BookPage:
     """Search the catalogue.
-
+ 
     Rules:
     - ``q`` matches title OR author, case-insensitive substring.
     - ``restricted`` filters exactly; ``min_price``/``max_price`` are inclusive.
@@ -56,13 +79,21 @@ def list_books(
     """
     query = select(Book)
     if q:
-        query = query.where(Book.title.icontains(q, autoescape=True))
+        query = query.where(
+            or_(
+                Book.title.icontains(q, autoescape=True),
+                Book.author.icontains(q, autoescape=True),
+            )
+        )
     if restricted is not None:
         query = query.where(Book.restricted == restricted)
-    # TODO: min_price / max_price filters
-
-    # TODO: apply ``sort``
-    books = db.scalars(query.order_by(Book.id.asc()).limit(limit).offset(offset)).all()
-    total = len(books)
-
+    if min_price is not None:
+        query = query.where(Book.price_cents >= min_price)
+    if max_price is not None:
+        query = query.where(Book.price_cents <= max_price)
+ 
+    # Counted on the filtered query, before limit/offset, so callers can page through.
+    total = db.scalar(select(func.count()).select_from(query.subquery()))
+ 
+    books = db.scalars(query.order_by(*_order_by(sort)).limit(limit).offset(offset)).all()
     return BookPage(items=books, total=total, limit=limit, offset=offset)
