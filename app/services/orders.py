@@ -40,13 +40,6 @@ def create_order(db: Session, data: OrderCreate, now: datetime) -> Order:
     Then stock is decremented for every item and prices are snapshotted.
     Pricing: discount_cents = subtotal * percent // 100; total = subtotal - discount.
     """
-    # TODO:
-    # 1. Load the member (404) and every book (404).
-    # 2. If any book is restricted, check the member's tier (403).
-    # 3. Check stock for every item before changing anything (409).
-    # 4. Decrement stock and build OrderItems with the current price as unit_price_cents.
-    # 5. Compute subtotal, discount_percent (calculate_discount_percent), discount_cents, total.
-    # 6. Save the pending Order with created_at = now and return it.
     member = db.get(Member, data.member_id)
     if member is None:
         raise HTTPException(status_code=404, detail="Member not found")
